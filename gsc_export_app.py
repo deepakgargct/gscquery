@@ -4,32 +4,52 @@ import json
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from datetime import date, timedelta
+import matplotlib.pyplot as plt
 
-st.set_page_config(page_title="GSC Query Exporter", layout="centered")
-st.title("📊 Google Search Console - 6 Month Query Exporter")
+# UI config
+st.set_page_config(page_title="GSC Comparison + Trends", layout="wide")
+st.title("📊 Google Search Console: 6 Month Comparison & Trends (Query + Page)")
 
 # Upload service account key
-uploaded_file = st.file_uploader("🔐 Upload your Service Account JSON key", type="json")
+uploaded_file = st.file_uploader("🔐 Upload your Google Service Account JSON key", type="json")
 
-# Define date range (last 6 months)
+# Date ranges
 end_date = date.today()
 start_date = end_date - timedelta(days=180)
+prev_start = start_date - timedelta(days=180)
+prev_end = start_date - timedelta(days=1)
+
+def fetch_gsc_data(service, site, start, end, dimensions):
+    request = {
+        'startDate': start.isoformat(),
+        'endDate': end.isoformat(),
+        'dimensions': dimensions,
+        'rowLimit': 25000
+    }
+    response = service.searchanalytics().query(siteUrl=site, body=request).execute()
+    rows = response.get("rows", [])
+    data = []
+    for row in rows:
+        keys = row['keys']
+        key_dict = {dim: key for dim, key in zip(dimensions, keys)}
+        key_dict.update({
+            'Clicks': row['clicks'],
+            'Impressions': row['impressions'],
+            'CTR (%)': round(row['clicks'] / row['impressions'] * 100, 2) if row['impressions'] else 0
+        })
+        data.append(key_dict)
+    return pd.DataFrame(data)
 
 if uploaded_file:
     try:
-        # Parse the uploaded JSON file
         service_account_info = json.load(uploaded_file)
-
-        # Authenticate using the service account
         credentials = service_account.Credentials.from_service_account_info(
             service_account_info,
             scopes=['https://www.googleapis.com/auth/webmasters.readonly']
         )
-
-        # Build GSC API client
         service = build('searchconsole', 'v1', credentials=credentials)
 
-        # Get verified site properties
+        # List verified properties
         site_list = service.sites().list().execute()
         verified_sites = [
             site['siteUrl']
@@ -38,42 +58,86 @@ if uploaded_file:
         ]
 
         if not verified_sites:
-            st.error("No verified properties found for this service account.")
+            st.error("No verified GSC properties found.")
         else:
-            selected_site = st.selectbox("Select a verified property", verified_sites)
+            selected_site = st.selectbox("Select a GSC property", verified_sites)
 
-            if st.button("🔍 Fetch GSC Data"):
-                st.info(f"Fetching query data from {start_date} to {end_date}...")
+            if st.button("📥 Fetch & Compare Data"):
+                with st.spinner("Fetching current 6-month data..."):
+                    current_df = fetch_gsc_data(service, selected_site, start_date, end_date, ['query', 'page'])
+                with st.spinner("Fetching previous 6-month data..."):
+                    prev_df = fetch_gsc_data(service, selected_site, prev_start, prev_end, ['query', 'page'])
 
-                # Prepare API request
-                request = {
-                    'startDate': start_date.isoformat(),
-                    'endDate': end_date.isoformat(),
-                    'dimensions': ['query'],
-                    'rowLimit': 25000
-                }
+                # Merge and compare
+                merged_df = pd.merge(
+                    current_df,
+                    prev_df,
+                    how='outer',
+                    on=['query', 'page'],
+                    suffixes=('_current', '_previous')
+                ).fillna(0)
 
-                response = service.searchanalytics().query(siteUrl=selected_site, body=request).execute()
+                # Calculate differences
+                merged_df['Clicks_diff'] = merged_df['Clicks_current'] - merged_df['Clicks_previous']
+                merged_df['Clicks_%change'] = merged_df.apply(
+                    lambda row: ((row['Clicks_diff'] / row['Clicks_previous']) * 100) if row['Clicks_previous'] != 0 else 100,
+                    axis=1
+                )
 
-                if 'rows' in response:
-                    data = []
-                    for row in response['rows']:
-                        query = row['keys'][0]
-                        clicks = row['clicks']
-                        impressions = row['impressions']
-                        ctr = round(clicks / impressions * 100, 2) if impressions else 0
-                        data.append([query, clicks, impressions, ctr])
+                merged_df['Impressions_diff'] = merged_df['Impressions_current'] - merged_df['Impressions_previous']
+                merged_df['Impr_%change'] = merged_df.apply(
+                    lambda row: ((row['Impressions_diff'] / row['Impressions_previous']) * 100) if row['Impressions_previous'] != 0 else 100,
+                    axis=1
+                )
 
-                    df = pd.DataFrame(data, columns=['Query', 'Clicks', 'Impressions', 'CTR (%)'])
-                    st.success(f"✅ Retrieved {len(df)} rows.")
-                    st.dataframe(df)
+                st.success(f"✅ Retrieved {len(merged_df)} rows with comparison.")
 
-                    csv = df.to_csv(index=False).encode('utf-8')
-                    st.download_button("📥 Download CSV", csv, "gsc_6_months_data.csv", "text/csv")
+                # Filter option for top movers
+                st.sidebar.header("Filter top growing/declining queries")
+                top_n = st.sidebar.number_input("Show top N queries", min_value=5, max_value=1000, value=20, step=5)
+                filter_mode = st.sidebar.radio("Select filter mode:", ['All', 'Top Growing', 'Top Declining'])
+
+                if filter_mode == 'Top Growing':
+                    filtered_df = merged_df.sort_values(by='Clicks_%change', ascending=False).head(top_n)
+                elif filter_mode == 'Top Declining':
+                    filtered_df = merged_df.sort_values(by='Clicks_%change', ascending=True).head(top_n)
                 else:
-                    st.warning("No data found for this site and time range.")
+                    filtered_df = merged_df
+
+                st.dataframe(filtered_df)
+
+                # Show aggregated trend charts for current vs previous 6 months
+                st.header("📈 Aggregated Performance Trends (Current vs Previous 6 Months)")
+
+                agg_current = current_df[['Clicks', 'Impressions', 'CTR (%)']].sum()
+                agg_prev = prev_df[['Clicks', 'Impressions', 'CTR (%)']].sum()
+
+                trend_df = pd.DataFrame({
+                    'Metric': ['Clicks', 'Impressions', 'CTR (%)'],
+                    'Previous 6 Months': [agg_prev['Clicks'], agg_prev['Impressions'], agg_prev['CTR (%)']],
+                    'Last 6 Months': [agg_current['Clicks'], agg_current['Impressions'], agg_current['CTR (%)']]
+                })
+
+                fig, ax = plt.subplots(figsize=(8, 5))
+                bar_width = 0.35
+                indices = range(len(trend_df))
+
+                ax.bar(indices, trend_df['Previous 6 Months'], bar_width, label='Previous 6 Months', color='#1f77b4')
+                ax.bar([i + bar_width for i in indices], trend_df['Last 6 Months'], bar_width, label='Last 6 Months', color='#ff7f0e')
+
+                ax.set_xticks([i + bar_width / 2 for i in indices])
+                ax.set_xticklabels(trend_df['Metric'])
+                ax.set_ylabel('Value')
+                ax.set_title('Aggregated GSC Metrics Comparison')
+                ax.legend()
+
+                st.pyplot(fig)
+
+                # Download CSV of filtered data
+                csv = filtered_df.to_csv(index=False).encode('utf-8')
+                st.download_button("⬇️ Download Filtered CSV", csv, "gsc_comparison_filtered.csv", "text/csv")
 
     except Exception as e:
-        st.error(f"❌ Authentication failed: {e}")
+        st.error(f"❌ Error: {e}")
 else:
-    st.info("Upload your Google service account JSON to begin.")
+    st.info("Please upload your Google service account JSON to get started.")

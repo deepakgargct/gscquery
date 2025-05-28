@@ -4,16 +4,12 @@ import json
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from datetime import date, timedelta
-import matplotlib.pyplot as plt
 
-# UI config
 st.set_page_config(page_title="GSC Comparison + Trends", layout="wide")
 st.title("📊 Google Search Console: 6 Month Comparison & Trends (Query + Page)")
 
-# Upload service account key
 uploaded_file = st.file_uploader("🔐 Upload your Google Service Account JSON key", type="json")
 
-# Date ranges
 end_date = date.today()
 start_date = end_date - timedelta(days=180)
 prev_start = start_date - timedelta(days=180)
@@ -49,7 +45,6 @@ if uploaded_file:
         )
         service = build('searchconsole', 'v1', credentials=credentials)
 
-        # List verified properties
         site_list = service.sites().list().execute()
         verified_sites = [
             site['siteUrl']
@@ -68,7 +63,6 @@ if uploaded_file:
                 with st.spinner("Fetching previous 6-month data..."):
                     prev_df = fetch_gsc_data(service, selected_site, prev_start, prev_end, ['query', 'page'])
 
-                # Merge and compare
                 merged_df = pd.merge(
                     current_df,
                     prev_df,
@@ -77,7 +71,6 @@ if uploaded_file:
                     suffixes=('_current', '_previous')
                 ).fillna(0)
 
-                # Calculate differences
                 merged_df['Clicks_diff'] = merged_df['Clicks_current'] - merged_df['Clicks_previous']
                 merged_df['Clicks_%change'] = merged_df.apply(
                     lambda row: ((row['Clicks_diff'] / row['Clicks_previous']) * 100) if row['Clicks_previous'] != 0 else 100,
@@ -92,7 +85,6 @@ if uploaded_file:
 
                 st.success(f"✅ Retrieved {len(merged_df)} rows with comparison.")
 
-                # Filter option for top movers
                 st.sidebar.header("Filter top growing/declining queries")
                 top_n = st.sidebar.number_input("Show top N queries", min_value=5, max_value=1000, value=20, step=5)
                 filter_mode = st.sidebar.radio("Select filter mode:", ['All', 'Top Growing', 'Top Declining'])
@@ -106,7 +98,6 @@ if uploaded_file:
 
                 st.dataframe(filtered_df)
 
-                # Show aggregated trend charts for current vs previous 6 months
                 st.header("📈 Aggregated Performance Trends (Current vs Previous 6 Months)")
 
                 agg_current = current_df[['Clicks', 'Impressions', 'CTR (%)']].sum()
@@ -116,24 +107,10 @@ if uploaded_file:
                     'Metric': ['Clicks', 'Impressions', 'CTR (%)'],
                     'Previous 6 Months': [agg_prev['Clicks'], agg_prev['Impressions'], agg_prev['CTR (%)']],
                     'Last 6 Months': [agg_current['Clicks'], agg_current['Impressions'], agg_current['CTR (%)']]
-                })
+                }).set_index('Metric')
 
-                fig, ax = plt.subplots(figsize=(8, 5))
-                bar_width = 0.35
-                indices = range(len(trend_df))
+                st.bar_chart(trend_df)
 
-                ax.bar(indices, trend_df['Previous 6 Months'], bar_width, label='Previous 6 Months', color='#1f77b4')
-                ax.bar([i + bar_width for i in indices], trend_df['Last 6 Months'], bar_width, label='Last 6 Months', color='#ff7f0e')
-
-                ax.set_xticks([i + bar_width / 2 for i in indices])
-                ax.set_xticklabels(trend_df['Metric'])
-                ax.set_ylabel('Value')
-                ax.set_title('Aggregated GSC Metrics Comparison')
-                ax.legend()
-
-                st.pyplot(fig)
-
-                # Download CSV of filtered data
                 csv = filtered_df.to_csv(index=False).encode('utf-8')
                 st.download_button("⬇️ Download Filtered CSV", csv, "gsc_comparison_filtered.csv", "text/csv")
 

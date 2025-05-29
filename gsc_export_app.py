@@ -4,65 +4,74 @@ from googleapiclient.discovery import build
 import pandas as pd
 import plotly.express as px
 from datetime import date
-from oauthlib.oauth2.rfc6749.errors import InvalidGrantError
 
 st.set_page_config(page_title="GSC Visualizer", layout="wide")
 st.title("📊 GSC Visualization: Unique URLs & Clicks Over Time")
 
-if "creds" not in st.session_state:
-    st.session_state.creds = None
-
+# Upload client_secrets.json
 uploaded_file = st.file_uploader("Upload your client_secrets.json", type="json")
 
 if uploaded_file:
     with open("client_secrets_temp.json", "wb") as f:
         f.write(uploaded_file.getbuffer())
 
-    if st.session_state.creds is None:
-        flow = Flow.from_client_secrets_file(
-            "client_secrets_temp.json",
-            scopes=["https://www.googleapis.com/auth/webmasters.readonly"],
-            redirect_uri="urn:ietf:wg:oauth:2.0:oob"
+    flow = Flow.from_client_secrets_file(
+        "client_secrets_temp.json",
+        scopes=["https://www.googleapis.com/auth/webmasters.readonly"],
+        redirect_uri="urn:ietf:wg:oauth:2.0:oob"
+    )
+
+    auth_url, _ = flow.authorization_url(prompt='consent')
+    st.markdown(f"[🔗 Click here to authorize]({auth_url})")
+    auth_code = st.text_input("Paste the authorization code here:")
+
+    if auth_code:
+        try:
+            flow.fetch_token(code=auth_code)
+            creds = flow.credentials
+            # Store credentials in session state so we can keep the session alive
+            st.session_state.creds = creds
+        except Exception as e:
+            st.error(f"Error fetching token: {e}")
+
+if "creds" in st.session_state:
+    creds = st.session_state.creds
+    service = build("searchconsole", "v1", credentials=creds)
+
+    # Fetch verified sites only once and store in session state
+    if "verified_sites" not in st.session_state:
+        site_list = service.sites().list().execute()
+        st.session_state.verified_sites = [
+            s["siteUrl"] for s in site_list.get("siteEntry", []) if s.get("permissionLevel") == "siteOwner"
+        ]
+
+    verified_sites = st.session_state.verified_sites
+
+    if verified_sites:
+        # Initialize selected site in session state if not set
+        if "selected_site" not in st.session_state or st.session_state.selected_site not in verified_sites:
+            st.session_state.selected_site = verified_sites[0]
+
+        site = st.selectbox(
+            "Choose a site",
+            verified_sites,
+            index=verified_sites.index(st.session_state.selected_site),
+            key="selected_site"
         )
 
-        auth_url, _ = flow.authorization_url(prompt='consent')
-        st.markdown(f"[🔗 Click here to authorize]({auth_url})")
-        st.info("⚠️ Please get a new authorization code each time and paste it below immediately after authorizing.")
+        start_date = st.date_input("Start date", date(2024, 4, 1))
+        end_date = st.date_input("End date", date(2024, 4, 30))
 
-        auth_code = st.text_input("Paste the authorization code here:").strip()
+        if st.button("Fetch and Visualize Data"):
+            request = {
+                "startDate": str(start_date),
+                "endDate": str(end_date),
+                "dimensions": ["date", "page"],
+                "rowLimit": 25000,
+                "dataState": "final"
+            }
 
-        if auth_code:
             try:
-                flow.fetch_token(code=auth_code)
-                st.session_state.creds = flow.credentials
-                st.success("Authorization successful! You can now fetch data.")
-            except InvalidGrantError as e:
-                st.error(f"Authorization failed: Invalid grant. The code may be expired or already used. Please retry with a fresh code.")
-            except Exception as e:
-                st.error(f"An unexpected error occurred during token fetch: {e}")
-
-    if st.session_state.creds:
-        service = build("searchconsole", "v1", credentials=st.session_state.creds)
-        site_list = service.sites().list().execute()
-        verified_sites = [s["siteUrl"] for s in site_list.get("siteEntry", []) if s.get("permissionLevel") == "siteOwner"]
-
-        if not verified_sites:
-            st.warning("No verified sites found for this account.")
-        else:
-            site = st.selectbox("Choose a site", verified_sites)
-            start_date = st.date_input("Start date", date(2024, 4, 1))
-            end_date = st.date_input("End date", date(2024, 4, 30))
-
-            if st.button("Fetch and Visualize Data"):
-                request = {
-                    "startDate": str(start_date),
-                    "endDate": str(end_date),
-                    "dimensions": ["date", "page"],
-                    # Removed country filter here
-                    "rowLimit": 25000,
-                    "dataState": "final"
-                }
-
                 response = service.searchanalytics().query(siteUrl=site, body=request).execute()
                 rows = response.get("rows", [])
 
@@ -97,6 +106,7 @@ if uploaded_file:
                     st.subheader("📋 Raw Data Preview")
                     st.dataframe(df.head())
 
+                    # Entity-level breakdown
                     st.subheader("🔍 Page-Level Insights")
                     page_summary = (
                         df.groupby("page")[["clicks", "impressions", "ctr", "position"]]
@@ -111,6 +121,7 @@ if uploaded_file:
                     )
                     st.dataframe(page_summary.head(20))
 
+                    # CSV Export
                     st.subheader("📥 Download CSV")
                     csv_raw = df.to_csv(index=False).encode("utf-8")
                     st.download_button("Download Raw Data (Date + Page)", csv_raw, "gsc_raw_data.csv", "text/csv")
@@ -118,6 +129,8 @@ if uploaded_file:
                     csv_page = page_summary.to_csv(index=False).encode("utf-8")
                     st.download_button("Download Page-Level Summary", csv_page, "gsc_page_summary.csv", "text/csv")
 
-        if st.button("Clear Credentials and Restart Authorization"):
-            st.session_state.creds = None
-            st.experimental_rerun()
+            except Exception as e:
+                st.error(f"Error fetching data from Search Console API: {e}")
+
+    else:
+        st.error("No verified sites found in your Search Console account.")

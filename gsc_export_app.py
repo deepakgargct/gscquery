@@ -1,10 +1,10 @@
-
 import streamlit as st
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 import pandas as pd
 import plotly.express as px
 from datetime import date, timedelta
+import json
 
 st.set_page_config(layout="wide")
 st.title("📊 Google Search Console: 6-Month Comparison & Trends")
@@ -31,8 +31,12 @@ group_by = st.selectbox("Group Data By", ["query", "page"])
 
 if uploaded_file and property_uri and st.button("Fetch Data"):
     st.session_state["data_fetched"] = True
+
+if st.session_state["data_fetched"]:
+    # Load credentials JSON as dict (fix for bytes error)
+    service_account_info = json.load(uploaded_file)
     credentials = service_account.Credentials.from_service_account_info(
-        uploaded_file.read(), scopes=["https://www.googleapis.com/auth/webmasters.readonly"]
+        service_account_info, scopes=["https://www.googleapis.com/auth/webmasters.readonly"]
     )
     service = build("searchconsole", "v1", credentials=credentials)
 
@@ -50,6 +54,10 @@ if uploaded_file and property_uri and st.button("Fetch Data"):
         return pd.DataFrame(data)
 
     df_current = fetch_data(start_date, end_date)
+
+    # Previous period calculation
+    default_prev_start = start_date - timedelta(days=(end_date - start_date).days + 1)
+    default_prev_end = start_date - timedelta(days=1)
     df_previous = fetch_data(default_prev_start, default_prev_end)
 
     df_current.rename(columns={
@@ -87,7 +95,7 @@ if uploaded_file and property_uri and st.button("Fetch Data"):
         decliners = merged.sort_values(by="Clicks_Diff").head(20)
         st.dataframe(decliners[[group_by, "Clicks_Current", "Clicks_Previous", "Clicks_Diff"]])
 
-    # 📉 CTR Drop + Impr Rise
+    # CTR Drop + Impressions Rise
     merged["CTR_Drop"] = merged["CTR_Current"] < merged["CTR_Previous"]
     merged["Clicks_Drop"] = merged["Clicks_Current"] < merged["Clicks_Previous"]
     merged["Impr_Rise"] = merged["Impressions_Current"] > merged["Impressions_Previous"]
@@ -128,4 +136,3 @@ if uploaded_file and property_uri and st.button("Fetch Data"):
         st.plotly_chart(fig, use_container_width=True)
     else:
         st.warning("No trend data available.")
-

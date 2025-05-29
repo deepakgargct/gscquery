@@ -1,138 +1,152 @@
 import streamlit as st
-from google.oauth2 import service_account
-from googleapiclient.discovery import build
 import pandas as pd
 import plotly.express as px
-from datetime import date, timedelta
-import json
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+from datetime import datetime, timedelta
 
-st.set_page_config(layout="wide")
-st.title("📊 Google Search Console: 6-Month Comparison & Trends")
-
-# Session state setup
+# Initialize session state keys
 if "data_fetched" not in st.session_state:
     st.session_state["data_fetched"] = False
+if "gsc_data_current" not in st.session_state:
+    st.session_state["gsc_data_current"] = None
+if "gsc_data_previous" not in st.session_state:
+    st.session_state["gsc_data_previous"] = None
 
-# Auth + Setup
-uploaded_file = st.file_uploader("Upload your Google Service Account JSON", type="json")
-property_uri = st.text_input("Enter your GSC Property URL (e.g., https://example.com)", "")
+st.title("Google Search Console: Query/Page Performance Export & Comparison")
 
-# Custom date input
-today = date.today()
-default_end = today - timedelta(days=3)
+# Upload service account JSON file
+uploaded_file = st.file_uploader("Upload your Google Service Account JSON key file", type=["json"])
+property_uri = st.text_input("Enter your GSC Property URL (e.g., https://example.com)", key="property_uri")
+
+# Date range selector for current period
+today = datetime.today()
+default_end = today - timedelta(days=1)
 default_start = default_end - timedelta(days=180)
-default_prev_start = default_start - timedelta(days=180)
-default_prev_end = default_start - timedelta(days=1)
+col1, col2 = st.columns(2)
+with col1:
+    start_date = st.date_input("Current Period Start Date", default_start)
+with col2:
+    end_date = st.date_input("Current Period End Date", default_end)
 
-start_date = st.date_input("Start Date", default_start)
-end_date = st.date_input("End Date", default_end)
+# Automatically calculate previous period
+prev_start_date = start_date - (end_date - start_date) - timedelta(days=1)
+prev_end_date = start_date - timedelta(days=1)
 
-group_by = st.selectbox("Group Data By", ["query", "page"])
+# Grouping choice
+group_by = st.selectbox("Group data by:", options=["query", "page"])
 
-if uploaded_file and property_uri and st.button("Fetch Data"):
-    st.session_state["data_fetched"] = True
+# Function to query GSC API
+def fetch_gsc_data(service, property_uri, start_date, end_date, dimension, row_limit=500):
+    request = {
+        "startDate": start_date.strftime("%Y-%m-%d"),
+        "endDate": end_date.strftime("%Y-%m-%d"),
+        "dimensions": [dimension, "date"],
+        "rowLimit": row_limit,
+    }
+    response = service.searchanalytics().query(siteUrl=property_uri, body=request).execute()
+    rows = response.get("rows", [])
+    data = []
+    for row in rows:
+        dims = row.get("keys", [])
+        if len(dims) == 2:
+            key, date = dims
+            clicks = row.get("clicks", 0)
+            impressions = row.get("impressions", 0)
+            ctr = row.get("ctr", 0)
+            position = row.get("position", 0)
+            data.append(
+                {
+                    dimension: key,
+                    "date": date,
+                    "clicks": clicks,
+                    "impressions": impressions,
+                    "ctr": ctr,
+                    "position": position,
+                }
+            )
+    df = pd.DataFrame(data)
+    return df
 
-if st.session_state["data_fetched"]:
-    # Load credentials JSON as dict (fix for bytes error)
-    service_account_info = json.load(uploaded_file)
-    credentials = service_account.Credentials.from_service_account_info(
-        service_account_info, scopes=["https://www.googleapis.com/auth/webmasters.readonly"]
+def aggregate_metrics(df, group_col):
+    agg = df.groupby(group_col).agg(
+        clicks=pd.NamedAgg(column="clicks", aggfunc="sum"),
+        impressions=pd.NamedAgg(column="impressions", aggfunc="sum"),
+        ctr=pd.NamedAgg(column="ctr", aggfunc="mean"),
+        position=pd.NamedAgg(column="position", aggfunc="mean"),
+    ).reset_index()
+    return agg
+
+def calculate_comparison(current, previous, group_col):
+    df = pd.merge(current, previous, on=group_col, suffixes=("_current", "_previous"))
+    df["clicks_change"] = df["clicks_current"] - df["clicks_previous"]
+    df["ctr_change"] = df["ctr_current"] - df["ctr_previous"]
+    df["impressions_change"] = df["impressions_current"] - df["impressions_previous"]
+    return df
+
+def filter_top_growing_declining(df):
+    # Top 20 where clicks and CTR dropped but impressions increased
+    filtered = df[
+        (df["clicks_change"] < 0)
+        & (df["ctr_change"] < 0)
+        & (df["impressions_change"] > 0)
+    ]
+    filtered = filtered.sort_values(by="impressions_change", ascending=False).head(20)
+    return filtered
+
+def plot_trends(df, group_col):
+    # Sum metrics per date and group_col to plot trends over time
+    df["date"] = pd.to_datetime(df["date"])
+    fig = px.line(
+        df,
+        x="date",
+        y="clicks",
+        color=group_col,
+        title=f"Clicks Over Time by {group_col.capitalize()}",
+        labels={"clicks": "Clicks", "date": "Date"},
     )
-    service = build("searchconsole", "v1", credentials=credentials)
+    st.plotly_chart(fig, use_container_width=True)
 
-    def fetch_data(start, end):
-        request = {
-            "startDate": str(start),
-            "endDate": str(end),
-            "dimensions": [group_by],
-            "rowLimit": 500,
-        }
-        response = service.searchanalytics().query(siteUrl=property_uri, body=request).execute()
-        rows = response.get("rows", [])
-        data = [{group_by: r["keys"][0], "Clicks": r["clicks"], "Impressions": r["impressions"],
-                 "CTR": r["ctr"] * 100, "Position": r["position"]} for r in rows]
-        return pd.DataFrame(data)
-
-    df_current = fetch_data(start_date, end_date)
-
-    # Previous period calculation
-    default_prev_start = start_date - timedelta(days=(end_date - start_date).days + 1)
-    default_prev_end = start_date - timedelta(days=1)
-    df_previous = fetch_data(default_prev_start, default_prev_end)
-
-    df_current.rename(columns={
-        "Clicks": "Clicks_Current",
-        "Impressions": "Impressions_Current",
-        "CTR": "CTR_Current",
-        "Position": "Position_Current"
-    }, inplace=True)
-    df_previous.rename(columns={
-        "Clicks": "Clicks_Previous",
-        "Impressions": "Impressions_Previous",
-        "CTR": "CTR_Previous",
-        "Position": "Position_Previous"
-    }, inplace=True)
-
-    merged = pd.merge(df_current, df_previous, on=group_by, how="outer").fillna(0)
-    merged["Clicks_Diff"] = merged["Clicks_Current"] - merged["Clicks_Previous"]
-    merged["CTR_Diff"] = merged["CTR_Current"] - merged["CTR_Previous"]
-    merged["Impr_Diff"] = merged["Impressions_Current"] - merged["Impressions_Previous"]
-    merged["Position_Diff"] = merged["Position_Previous"] - merged["Position_Current"]
-
-    st.subheader("📈 6-Month Comparison")
-    st.dataframe(merged.sort_values(by="Clicks_Current", ascending=False), use_container_width=True)
-
-    # Top Gainers & Decliners
-    col1, col2 = st.columns(2)
-
-    with col1:
-        st.subheader("🔼 Top Gainers")
-        gainers = merged.sort_values(by="Clicks_Diff", ascending=False).head(20)
-        st.dataframe(gainers[[group_by, "Clicks_Current", "Clicks_Previous", "Clicks_Diff"]])
-
-    with col2:
-        st.subheader("🔽 Top Decliners")
-        decliners = merged.sort_values(by="Clicks_Diff").head(20)
-        st.dataframe(decliners[[group_by, "Clicks_Current", "Clicks_Previous", "Clicks_Diff"]])
-
-    # CTR Drop + Impressions Rise
-    merged["CTR_Drop"] = merged["CTR_Current"] < merged["CTR_Previous"]
-    merged["Clicks_Drop"] = merged["Clicks_Current"] < merged["Clicks_Previous"]
-    merged["Impr_Rise"] = merged["Impressions_Current"] > merged["Impressions_Previous"]
-    declining_focus = merged[merged["CTR_Drop"] & merged["Clicks_Drop"] & merged["Impr_Rise"]]
-    st.subheader("📉 CTR & Click Drop + Impressions Rise (Top 20)")
-    st.dataframe(declining_focus.sort_values(by="Clicks_Diff").head(20), use_container_width=True)
-
-    # Trends over time
-    def fetch_over_time(dim):
-        request = {
-            "startDate": str(start_date),
-            "endDate": str(end_date),
-            "dimensions": ["date", dim],
-            "rowLimit": 500
-        }
-        response = service.searchanalytics().query(siteUrl=property_uri, body=request).execute()
-        rows = response.get("rows", [])
-        data = []
-        for r in rows:
-            d = {
-                "date": r["keys"][0],
-                dim: r["keys"][1],
-                "Clicks": r["clicks"],
-                "Impressions": r["impressions"],
-                "CTR": r["ctr"] * 100,
-                "Position": r["position"]
-            }
-            data.append(d)
-        return pd.DataFrame(data)
-
-    st.subheader("📈 Trends Over Time (Top Performers)")
-    df_trend = fetch_over_time(group_by)
-    if not df_trend.empty:
-        top_entities = df_trend.groupby(group_by)["Clicks"].sum().sort_values(ascending=False).head(5).index
-        fig = px.line(df_trend[df_trend[group_by].isin(top_entities)],
-                      x="date", y="Clicks", color=group_by,
-                      title="Clicks Over Time")
-        st.plotly_chart(fig, use_container_width=True)
+# Main logic
+if st.button("Fetch and Compare Data"):
+    if not uploaded_file or not property_uri:
+        st.error("Please upload a service account JSON key file and enter your GSC Property URL.")
     else:
-        st.warning("No trend data available.")
+        try:
+            creds = service_account.Credentials.from_service_account_info(
+                uploaded_file.getvalue()
+            )
+            service = build("searchconsole", "v1", credentials=creds, cache_discovery=False)
+
+            # Fetch current and previous period data
+            with st.spinner("Fetching current period data..."):
+                df_current = fetch_gsc_data(service, property_uri, start_date, end_date, group_by)
+            with st.spinner("Fetching previous period data..."):
+                df_previous = fetch_gsc_data(service, property_uri, prev_start_date, prev_end_date, group_by)
+
+            st.session_state.gsc_data_current = df_current
+            st.session_state.gsc_data_previous = df_previous
+            st.session_state.data_fetched = True
+
+        except Exception as e:
+            st.error(f"Error fetching data from Google Search Console API:\n{e}")
+
+if st.session_state.data_fetched:
+    st.subheader("Aggregated Current Period Metrics")
+    agg_current = aggregate_metrics(st.session_state.gsc_data_current, group_by)
+    st.dataframe(agg_current)
+
+    st.subheader("Aggregated Previous Period Metrics")
+    agg_previous = aggregate_metrics(st.session_state.gsc_data_previous, group_by)
+    st.dataframe(agg_previous)
+
+    st.subheader("Comparison: Current vs Previous Period")
+    comparison_df = calculate_comparison(agg_current, agg_previous, group_by)
+    st.dataframe(comparison_df)
+
+    st.subheader("Top 20 Queries/Pages with Clicks and CTR Dropping but Impressions Rising")
+    filtered = filter_top_growing_declining(comparison_df)
+    st.dataframe(filtered)
+
+    st.subheader("Trends Over Time (Clicks) by {}".format(group_by.capitalize()))
+    plot_trends(st.session_state.gsc_data_current, group_by)

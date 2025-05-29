@@ -1,163 +1,131 @@
+
 import streamlit as st
-import pandas as pd
-import json
-from datetime import date, timedelta
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
+import pandas as pd
+import plotly.express as px
+from datetime import date, timedelta
 
-st.set_page_config(page_title="GSC Analyzer", layout="wide")
-st.title("📊 Google Search Console Analyzer")
+st.set_page_config(layout="wide")
+st.title("📊 Google Search Console: 6-Month Comparison & Trends")
 
-uploaded_file = st.file_uploader("Upload your GSC service account JSON", type="json")
+# Session state setup
+if "data_fetched" not in st.session_state:
+    st.session_state["data_fetched"] = False
 
-if uploaded_file:
-    try:
-        creds_json = json.load(uploaded_file)
-        creds = service_account.Credentials.from_service_account_info(
-            creds_json,
-            scopes=["https://www.googleapis.com/auth/webmasters.readonly"]
-        )
-        service = build("searchconsole", "v1", credentials=creds)
+# Auth + Setup
+uploaded_file = st.file_uploader("Upload your Google Service Account JSON", type="json")
+property_uri = st.text_input("Enter your GSC Property URL (e.g., https://example.com)", "")
 
-        sites = service.sites().list().execute()
-        verified_sites = [s["siteUrl"] for s in sites["siteEntry"] if s["permissionLevel"] != "siteUnverifiedUser"]
-        selected_site = st.selectbox("Choose a verified property", verified_sites)
+# Custom date input
+today = date.today()
+default_end = today - timedelta(days=3)
+default_start = default_end - timedelta(days=180)
+default_prev_start = default_start - timedelta(days=180)
+default_prev_end = default_start - timedelta(days=1)
 
-        # 🔘 Grouping choice
-        group_option = st.radio("Group results by:", ["Query", "Page", "Query + Page"])
+start_date = st.date_input("Start Date", default_start)
+end_date = st.date_input("End Date", default_end)
 
-        # 📆 Date selectors
-        col1, col2 = st.columns(2)
-        with col1:
-            start_date = st.date_input("Select START date (for comparison)", date.today() - timedelta(days=180))
-        with col2:
-            end_date = st.date_input("Select END date (for comparison)", date.today())
+group_by = st.selectbox("Group Data By", ["query", "page"])
 
-        if start_date >= end_date:
-            st.warning("Start date must be before end date.")
-        elif st.button("Fetch Data"):
-            compare_start = start_date - (end_date - start_date)
-            compare_end = start_date - timedelta(days=1)
+if uploaded_file and property_uri and st.button("Fetch Data"):
+    st.session_state["data_fetched"] = True
+    credentials = service_account.Credentials.from_service_account_info(
+        uploaded_file.read(), scopes=["https://www.googleapis.com/auth/webmasters.readonly"]
+    )
+    service = build("searchconsole", "v1", credentials=credentials)
 
-            def fetch_data(start, end):
-                request = {
-                    "startDate": start.isoformat(),
-                    "endDate": end.isoformat(),
-                    "dimensions": ["query", "page"],
-                    "rowLimit": 10000
-                }
-                response = service.searchanalytics().query(siteUrl=selected_site, body=request).execute()
-                rows = response.get("rows", [])
-                return pd.DataFrame([{
-                    "Query": r["keys"][0],
-                    "Page": r["keys"][1],
-                    "Clicks": r["clicks"],
-                    "Impressions": r["impressions"],
-                    "CTR": round(r["ctr"] * 100, 2),
-                    "Position": round(r["position"], 2)
-                } for r in rows])
+    def fetch_data(start, end):
+        request = {
+            "startDate": str(start),
+            "endDate": str(end),
+            "dimensions": [group_by],
+            "rowLimit": 500,
+        }
+        response = service.searchanalytics().query(siteUrl=property_uri, body=request).execute()
+        rows = response.get("rows", [])
+        data = [{group_by: r["keys"][0], "Clicks": r["clicks"], "Impressions": r["impressions"],
+                 "CTR": r["ctr"] * 100, "Position": r["position"]} for r in rows]
+        return pd.DataFrame(data)
 
-            df_current = fetch_data(start_date, end_date)
-            df_previous = fetch_data(compare_start, compare_end)
+    df_current = fetch_data(start_date, end_date)
+    df_previous = fetch_data(default_prev_start, default_prev_end)
 
-            # Select grouping keys
-            if group_option == "Query":
-                key_cols = ["Query"]
-            elif group_option == "Page":
-                key_cols = ["Page"]
-            else:
-                key_cols = ["Query", "Page"]
+    df_current.rename(columns={
+        "Clicks": "Clicks_Current",
+        "Impressions": "Impressions_Current",
+        "CTR": "CTR_Current",
+        "Position": "Position_Current"
+    }, inplace=True)
+    df_previous.rename(columns={
+        "Clicks": "Clicks_Previous",
+        "Impressions": "Impressions_Previous",
+        "CTR": "CTR_Previous",
+        "Position": "Position_Previous"
+    }, inplace=True)
 
-            df_group_current = df_current.groupby(key_cols).agg({
-                "Clicks": "sum",
-                "Impressions": "sum",
-                "CTR": "mean",
-                "Position": "mean"
-            }).reset_index()
+    merged = pd.merge(df_current, df_previous, on=group_by, how="outer").fillna(0)
+    merged["Clicks_Diff"] = merged["Clicks_Current"] - merged["Clicks_Previous"]
+    merged["CTR_Diff"] = merged["CTR_Current"] - merged["CTR_Previous"]
+    merged["Impr_Diff"] = merged["Impressions_Current"] - merged["Impressions_Previous"]
+    merged["Position_Diff"] = merged["Position_Previous"] - merged["Position_Current"]
 
-            df_group_previous = df_previous.groupby(key_cols).agg({
-                "Clicks": "sum",
-                "Impressions": "sum",
-                "CTR": "mean",
-                "Position": "mean"
-            }).reset_index()
+    st.subheader("📈 6-Month Comparison")
+    st.dataframe(merged.sort_values(by="Clicks_Current", ascending=False), use_container_width=True)
 
-            df_merged = pd.merge(
-                df_group_current,
-                df_group_previous,
-                on=key_cols,
-                how="outer",
-                suffixes=("_Current", "_Previous")
-            ).fillna(0)
+    # Top Gainers & Decliners
+    col1, col2 = st.columns(2)
 
-            # Add delta metrics
-            df_merged["Click_Change"] = df_merged["Clicks_Current"] - df_merged["Clicks_Previous"]
-            df_merged["CTR_Change"] = df_merged["CTR_Current"] - df_merged["CTR_Previous"]
-            df_merged["Position_Change"] = df_merged["Position_Current"] - df_merged["Position_Previous"]
+    with col1:
+        st.subheader("🔼 Top Gainers")
+        gainers = merged.sort_values(by="Clicks_Diff", ascending=False).head(20)
+        st.dataframe(gainers[[group_by, "Clicks_Current", "Clicks_Previous", "Clicks_Diff"]])
 
-            st.subheader("⬆️ Top Growing by Clicks")
-            st.dataframe(df_merged.sort_values("Click_Change", ascending=False).head(10))
+    with col2:
+        st.subheader("🔽 Top Decliners")
+        decliners = merged.sort_values(by="Clicks_Diff").head(20)
+        st.dataframe(decliners[[group_by, "Clicks_Current", "Clicks_Previous", "Clicks_Diff"]])
 
-            st.subheader("⬇️ Top Declining by Clicks")
-            st.dataframe(df_merged.sort_values("Click_Change", ascending=True).head(10))
+    # 📉 CTR Drop + Impr Rise
+    merged["CTR_Drop"] = merged["CTR_Current"] < merged["CTR_Previous"]
+    merged["Clicks_Drop"] = merged["Clicks_Current"] < merged["Clicks_Previous"]
+    merged["Impr_Rise"] = merged["Impressions_Current"] > merged["Impressions_Previous"]
+    declining_focus = merged[merged["CTR_Drop"] & merged["Clicks_Drop"] & merged["Impr_Rise"]]
+    st.subheader("📉 CTR & Click Drop + Impressions Rise (Top 20)")
+    st.dataframe(declining_focus.sort_values(by="Clicks_Diff").head(20), use_container_width=True)
 
-            # ==============================
-            # 📈 Trend Chart by Top Entities
-            # ==============================
-            st.subheader("📈 Trends Over Time (Top Performers)")
-
-            top_entities = df_group_current.sort_values("Clicks", ascending=False).head(5)
-
-            # Fetch trend over time (by date + grouping)
-            trend_request = {
-                "startDate": start_date.isoformat(),
-                "endDate": end_date.isoformat(),
-                "dimensions": ["date", "query", "page"],
-                "rowLimit": 25000
+    # Trends over time
+    def fetch_over_time(dim):
+        request = {
+            "startDate": str(start_date),
+            "endDate": str(end_date),
+            "dimensions": ["date", dim],
+            "rowLimit": 500
+        }
+        response = service.searchanalytics().query(siteUrl=property_uri, body=request).execute()
+        rows = response.get("rows", [])
+        data = []
+        for r in rows:
+            d = {
+                "date": r["keys"][0],
+                dim: r["keys"][1],
+                "Clicks": r["clicks"],
+                "Impressions": r["impressions"],
+                "CTR": r["ctr"] * 100,
+                "Position": r["position"]
             }
-            response = service.searchanalytics().query(siteUrl=selected_site, body=trend_request).execute()
-            trend_rows = response.get("rows", [])
+            data.append(d)
+        return pd.DataFrame(data)
 
-            trend_data = []
-            for row in trend_rows:
-                keys = row.get("keys", [])
-                date_val = keys[0]
-                query_val = keys[1]
-                page_val = keys[2]
-                match_key = {
-                    "Query": query_val,
-                    "Page": page_val,
-                    "Query + Page": (query_val, page_val)
-                }[group_option]
-                if match_key in top_entities.set_index(key_cols).index:
-                    trend_data.append({
-                        "Date": date_val,
-                        "Key": " | ".join([query_val]) if group_option == "Query" else (
-                            page_val if group_option == "Page" else f"{query_val} | {page_val}"
-                        ),
-                        "Clicks": row["clicks"]
-                    })
+    st.subheader("📈 Trends Over Time (Top Performers)")
+    df_trend = fetch_over_time(group_by)
+    if not df_trend.empty:
+        top_entities = df_trend.groupby(group_by)["Clicks"].sum().sort_values(ascending=False).head(5).index
+        fig = px.line(df_trend[df_trend[group_by].isin(top_entities)],
+                      x="date", y="Clicks", color=group_by,
+                      title="Clicks Over Time")
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.warning("No trend data available.")
 
-            trend_df = pd.DataFrame(trend_data)
-            if not trend_df.empty:
-                trend_df["Date"] = pd.to_datetime(trend_df["Date"])
-                chart_df = trend_df.pivot(index="Date", columns="Key", values="Clicks").fillna(0)
-                st.line_chart(chart_df)
-            else:
-                st.info("No trend data available for top results in selected date range.")
-
-            # ==============================
-            # 💾 Download merged dataset
-            # ==============================
-            st.subheader("📥 Download Comparison Dataset")
-            st.download_button(
-                "Download CSV",
-                df_merged.to_csv(index=False),
-                file_name="gsc_comparison.csv",
-                mime="text/csv"
-            )
-
-    except Exception as e:
-        st.error(f"Error: {e}")
-else:
-    st.info("Upload your GSC service account JSON to begin.")

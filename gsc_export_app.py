@@ -52,18 +52,13 @@ if uploaded_file:
             site = st.selectbox("Choose a site", verified_sites)
             start_date = st.date_input("Start date", date(2024, 4, 1))
             end_date = st.date_input("End date", date(2024, 4, 30))
-            country = st.text_input("Filter by Country Code (e.g., USA)", value="USA")
 
             if st.button("Fetch and Visualize Data"):
                 request = {
                     "startDate": str(start_date),
                     "endDate": str(end_date),
                     "dimensions": ["date", "page"],
-                    "dimensionFilterGroups": [{
-                        "filters": [
-                            {"dimension": "country", "expression": country, "operator": "equals"}
-                        ]
-                    }],
+                    # Removed country filter here
                     "rowLimit": 25000,
                     "dataState": "final"
                 }
@@ -72,7 +67,7 @@ if uploaded_file:
                 rows = response.get("rows", [])
 
                 if not rows:
-                    st.warning("No data returned for this period and country.")
+                    st.warning("No data returned for this period.")
                 else:
                     records = []
                     for row in rows:
@@ -102,7 +97,6 @@ if uploaded_file:
                     st.subheader("📋 Raw Data Preview")
                     st.dataframe(df.head())
 
-                    # Entity-level breakdown
                     st.subheader("🔍 Page-Level Insights")
                     page_summary = (
                         df.groupby("page")[["clicks", "impressions", "ctr", "position"]]
@@ -117,7 +111,6 @@ if uploaded_file:
                     )
                     st.dataframe(page_summary.head(20))
 
-                    # CSV Export
                     st.subheader("📥 Download CSV")
                     csv_raw = df.to_csv(index=False).encode("utf-8")
                     st.download_button("Download Raw Data (Date + Page)", csv_raw, "gsc_raw_data.csv", "text/csv")

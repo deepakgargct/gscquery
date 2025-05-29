@@ -4,6 +4,7 @@ import plotly.express as px
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from datetime import datetime, timedelta
+import json  # <--- import json to parse uploaded file
 
 # Initialize session state keys
 if "data_fetched" not in st.session_state:
@@ -15,11 +16,9 @@ if "gsc_data_previous" not in st.session_state:
 
 st.title("Google Search Console: Query/Page Performance Export & Comparison")
 
-# Upload service account JSON file
 uploaded_file = st.file_uploader("Upload your Google Service Account JSON key file", type=["json"])
 property_uri = st.text_input("Enter your GSC Property URL (e.g., https://example.com)", key="property_uri")
 
-# Date range selector for current period
 today = datetime.today()
 default_end = today - timedelta(days=1)
 default_start = default_end - timedelta(days=180)
@@ -29,14 +28,11 @@ with col1:
 with col2:
     end_date = st.date_input("Current Period End Date", default_end)
 
-# Automatically calculate previous period
 prev_start_date = start_date - (end_date - start_date) - timedelta(days=1)
 prev_end_date = start_date - timedelta(days=1)
 
-# Grouping choice
 group_by = st.selectbox("Group data by:", options=["query", "page"])
 
-# Function to query GSC API
 def fetch_gsc_data(service, property_uri, start_date, end_date, dimension, row_limit=500):
     request = {
         "startDate": start_date.strftime("%Y-%m-%d"),
@@ -85,7 +81,6 @@ def calculate_comparison(current, previous, group_col):
     return df
 
 def filter_top_growing_declining(df):
-    # Top 20 where clicks and CTR dropped but impressions increased
     filtered = df[
         (df["clicks_change"] < 0)
         & (df["ctr_change"] < 0)
@@ -95,7 +90,6 @@ def filter_top_growing_declining(df):
     return filtered
 
 def plot_trends(df, group_col):
-    # Sum metrics per date and group_col to plot trends over time
     df["date"] = pd.to_datetime(df["date"])
     fig = px.line(
         df,
@@ -107,18 +101,15 @@ def plot_trends(df, group_col):
     )
     st.plotly_chart(fig, use_container_width=True)
 
-# Main logic
 if st.button("Fetch and Compare Data"):
     if not uploaded_file or not property_uri:
         st.error("Please upload a service account JSON key file and enter your GSC Property URL.")
     else:
         try:
-            creds = service_account.Credentials.from_service_account_info(
-                uploaded_file.getvalue()
-            )
+            json_dict = json.load(uploaded_file)  # <-- parse bytes JSON to dict here
+            creds = service_account.Credentials.from_service_account_info(json_dict)
             service = build("searchconsole", "v1", credentials=creds, cache_discovery=False)
 
-            # Fetch current and previous period data
             with st.spinner("Fetching current period data..."):
                 df_current = fetch_gsc_data(service, property_uri, start_date, end_date, group_by)
             with st.spinner("Fetching previous period data..."):
@@ -148,5 +139,5 @@ if st.session_state.data_fetched:
     filtered = filter_top_growing_declining(comparison_df)
     st.dataframe(filtered)
 
-    st.subheader("Trends Over Time (Clicks) by {}".format(group_by.capitalize()))
+    st.subheader(f"Trends Over Time (Clicks) by {group_by.capitalize()}")
     plot_trends(st.session_state.gsc_data_current, group_by)

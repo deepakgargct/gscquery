@@ -1,7 +1,7 @@
+
 streamlit
-google-auth
-google-auth-oauthlib
-google-auth-httplib2
-google-api-python-client
 pandas
 plotly
+google-auth
+google-auth-oauthlib
+google-api-python-client

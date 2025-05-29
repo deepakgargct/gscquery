@@ -4,24 +4,17 @@ import plotly.express as px
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from datetime import datetime, timedelta
-import json  # <--- import json to parse uploaded file
+import json
 
-# Initialize session state keys
-if "data_fetched" not in st.session_state:
-    st.session_state["data_fetched"] = False
-if "gsc_data_current" not in st.session_state:
-    st.session_state["gsc_data_current"] = None
-if "gsc_data_previous" not in st.session_state:
-    st.session_state["gsc_data_previous"] = None
-
-st.title("Google Search Console: Query/Page Performance Export & Comparison")
+st.title("Google Search Console Performance Comparison")
 
 uploaded_file = st.file_uploader("Upload your Google Service Account JSON key file", type=["json"])
-property_uri = st.text_input("Enter your GSC Property URL (e.g., https://example.com)", key="property_uri")
+property_uri = st.text_input("Enter your GSC Property URL (e.g., https://example.com)")
 
 today = datetime.today()
 default_end = today - timedelta(days=1)
 default_start = default_end - timedelta(days=180)
+
 col1, col2 = st.columns(2)
 with col1:
     start_date = st.date_input("Current Period Start Date", default_start)
@@ -61,8 +54,7 @@ def fetch_gsc_data(service, property_uri, start_date, end_date, dimension, row_l
                     "position": position,
                 }
             )
-    df = pd.DataFrame(data)
-    return df
+    return pd.DataFrame(data)
 
 def aggregate_metrics(df, group_col):
     agg = df.groupby(group_col).agg(
@@ -78,27 +70,29 @@ def calculate_comparison(current, previous, group_col):
     df["clicks_change"] = df["clicks_current"] - df["clicks_previous"]
     df["ctr_change"] = df["ctr_current"] - df["ctr_previous"]
     df["impressions_change"] = df["impressions_current"] - df["impressions_previous"]
+    df["position_change"] = df["position_current"] - df["position_previous"]
     return df
 
-def filter_top_growing_declining(df):
+def filter_top_dropping(df):
     filtered = df[
-        (df["clicks_change"] < 0)
-        & (df["ctr_change"] < 0)
-        & (df["impressions_change"] > 0)
-    ]
-    filtered = filtered.sort_values(by="impressions_change", ascending=False).head(20)
+        (df["clicks_change"] < 0) &
+        (df["ctr_change"] < 0) &
+        (df["impressions_change"] > 0)
+    ].sort_values(by="impressions_change", ascending=False).head(20)
     return filtered
 
-def plot_trends(df, group_col):
+def plot_position_trends(df, group_col):
     df["date"] = pd.to_datetime(df["date"])
+    # average position over time per group_col
     fig = px.line(
-        df,
+        df.groupby([group_col, "date"])["position"].mean().reset_index(),
         x="date",
-        y="clicks",
+        y="position",
         color=group_col,
-        title=f"Clicks Over Time by {group_col.capitalize()}",
-        labels={"clicks": "Clicks", "date": "Date"},
+        title=f"Average Position Over Time by {group_col.capitalize()}",
+        labels={"position": "Average Position", "date": "Date"},
     )
+    fig.update_yaxes(autorange="reversed")  # lower position is better
     st.plotly_chart(fig, use_container_width=True)
 
 if st.button("Fetch and Compare Data"):
@@ -106,7 +100,7 @@ if st.button("Fetch and Compare Data"):
         st.error("Please upload a service account JSON key file and enter your GSC Property URL.")
     else:
         try:
-            json_dict = json.load(uploaded_file)  # <-- parse bytes JSON to dict here
+            json_dict = json.load(uploaded_file)
             creds = service_account.Credentials.from_service_account_info(json_dict)
             service = build("searchconsole", "v1", credentials=creds, cache_discovery=False)
 
@@ -115,29 +109,31 @@ if st.button("Fetch and Compare Data"):
             with st.spinner("Fetching previous period data..."):
                 df_previous = fetch_gsc_data(service, property_uri, prev_start_date, prev_end_date, group_by)
 
-            st.session_state.gsc_data_current = df_current
-            st.session_state.gsc_data_previous = df_previous
-            st.session_state.data_fetched = True
+            agg_current = aggregate_metrics(df_current, group_by)
+            agg_previous = aggregate_metrics(df_previous, group_by)
+
+            comparison_df = calculate_comparison(agg_current, agg_previous, group_by)
+
+            st.subheader("Summary Comparison (Current vs Previous Period)")
+            st.dataframe(comparison_df.style.format({
+                "ctr_current": "{:.2%}", "ctr_previous": "{:.2%}", "ctr_change": "{:.2%}",
+                "position_current": "{:.2f}", "position_previous": "{:.2f}", "position_change": "{:.2f}"
+            }))
+
+            st.subheader("Top 20 Dropping Queries/Pages (Clicks & CTR down, Impressions up)")
+            filtered = filter_top_dropping(comparison_df)
+            st.dataframe(filtered.style.format({
+                "ctr_current": "{:.2%}", "ctr_previous": "{:.2%}", "ctr_change": "{:.2%}",
+                "position_current": "{:.2f}", "position_previous": "{:.2f}", "position_change": "{:.2f}"
+            }))
+
+            st.subheader(f"Aggregated Current Period Metrics by {group_by.capitalize()}")
+            st.dataframe(agg_current.style.format({
+                "ctr": "{:.2%}", "position": "{:.2f}"
+            }))
+
+            st.subheader(f"Average Position Trends Over Time by {group_by.capitalize()}")
+            plot_position_trends(df_current, group_by)
 
         except Exception as e:
             st.error(f"Error fetching data from Google Search Console API:\n{e}")
-
-if st.session_state.data_fetched:
-    st.subheader("Aggregated Current Period Metrics")
-    agg_current = aggregate_metrics(st.session_state.gsc_data_current, group_by)
-    st.dataframe(agg_current)
-
-    st.subheader("Aggregated Previous Period Metrics")
-    agg_previous = aggregate_metrics(st.session_state.gsc_data_previous, group_by)
-    st.dataframe(agg_previous)
-
-    st.subheader("Comparison: Current vs Previous Period")
-    comparison_df = calculate_comparison(agg_current, agg_previous, group_by)
-    st.dataframe(comparison_df)
-
-    st.subheader("Top 20 Queries/Pages with Clicks and CTR Dropping but Impressions Rising")
-    filtered = filter_top_growing_declining(comparison_df)
-    st.dataframe(filtered)
-
-    st.subheader(f"Trends Over Time (Clicks) by {group_by.capitalize()}")
-    plot_trends(st.session_state.gsc_data_current, group_by)
